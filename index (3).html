@@ -5,25 +5,38 @@
   <title>Mushroom Guy</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #f0f0f0; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
-    canvas { background: #d8b4fe; border: 2px solid #333; display: block; }
-    #controls { margin-top: 10px; color: #555; font-size: 14px; }
-    #coin-counter { margin-bottom: 10px; padding: 8px 24px; font-size: 16px; font-weight: bold; border: 2px solid #B8860B; border-radius: 6px; background: #FFD700; color: #5a3e00; pointer-events: none; }
-    #btn-row { margin-top: 10px; }
-    #btn-level1 { padding: 8px 28px; font-size: 16px; font-weight: bold; border: 2px solid #333; border-radius: 6px; cursor: pointer; background: #4CAF50; color: white; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #111; font-family: sans-serif; }
+    body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    canvas { display: block; background: #d8b4fe; }
+    #ui { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; z-index: 10; }
+    #controls { color: #ccc; font-size: 13px; }
+    #coin-counter { padding: 6px 18px; font-size: 15px; font-weight: bold; border: 2px solid #B8860B; border-radius: 6px; background: #FFD700; color: #5a3e00; pointer-events: none; }
+    #btn-level1 { padding: 6px 22px; font-size: 15px; font-weight: bold; border: 2px solid #333; border-radius: 6px; cursor: pointer; background: #4CAF50; color: white; }
   </style>
 </head>
 <body>
-  <div id="coin-counter">🪙 0 / 0 collected</div>
   <canvas id="game" width="1200" height="500"></canvas>
-  <div id="controls">Arrow Keys or WASD to move &nbsp;|&nbsp; Space / Up / W to jump</div>
-  <div id="btn-row">
+  <div id="ui">
+    <div id="coin-counter">🪙 0 / 0 collected</div>
     <button id="btn-level1" onclick="startLevel1()">Level 1</button>
+    <div id="controls">Arrow Keys / WASD to move &nbsp;|&nbsp; Space / W to jump</div>
   </div>
 
   <script>
     const canvas = document.getElementById('game');
     const ctx = canvas.getContext('2d');
+
+    const BASE_W = 1200, BASE_H = 500;
+
+    function resizeCanvas() {
+      const scaleX = window.innerWidth  / BASE_W;
+      const scaleY = window.innerHeight / BASE_H;
+      const scale  = Math.min(scaleX, scaleY);
+      canvas.style.width  = BASE_W * scale + 'px';
+      canvas.style.height = BASE_H * scale + 'px';
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
 
     // Platforms (x, y, width) — matching your sketch layout
     const platforms = [
@@ -273,8 +286,9 @@
       }
       if (!wasOnGround && player.onGround) playLand();
 
-      // Win condition — player touches the flag
-      if (player.onGround &&
+      // Win condition — player touches the flag with all coins collected
+      const allCollected = coins.every(c => c.collected);
+      if (player.onGround && allCollected &&
           player.x + player.w > flag.x - 18 && player.x < flag.x + 18 &&
           Math.abs(player.y + player.h - flag.y) <= 2) {
         gameWon = true;

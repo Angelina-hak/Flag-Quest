@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mushroom Guy</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #f0f0f0; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+    canvas { background: #d8b4fe; border: 2px solid #333; display: block; }
+    #controls { margin-top: 10px; color: #555; font-size: 14px; }
+    #btn-row { margin-top: 10px; display: flex; gap: 12px; }
+    #btn-row button { padding: 8px 28px; font-size: 16px; font-weight: bold; border: 2px solid #333; border-radius: 6px; cursor: pointer; }
+    #btn-on  { background: #4CAF50; color: white; }
+    #btn-off { background: #e53935; color: white; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="1200" height="500"></canvas>
+  <div id="controls">Arrow Keys or WASD to move &nbsp;|&nbsp; Space / Up / W to jump</div>
+  <div id="btn-row">
+    <button id="btn-on"  onclick="onGame()">ON</button>
+    <button id="btn-off" onclick="offGame()">OFF</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    // Platforms (x, y, width) — matching your sketch layout
+    const platforms = [
+      { x: 0,   y: 420, w: 220 },                       // ground left (start)
+      { x: 280, y: 370, w: 150 },                       // first step
+      { x: 500, y: 330, w: 150 },                       // second step
+      { x: 750, y: 300, w: 200 },                       // flag platform (highest)
+      { x: 80,  y: 310, w: 130, noEnemy: true, conveyor:  2 },  // decoration — pushes right
+      { x: 950, y: 375, w: 140, noEnemy: true, conveyor: -2 },  // decoration — pushes left
+      { x: 1060,y: 335, w: 130, noEnemy: true, conveyor:  2 },  // decoration — pushes right
+    ];
+
+    const GROUND_Y = 420; // top of the leftmost ground platform
+
+    const player = {
+      x: 70,
+      y: GROUND_Y - 60,
+      w: 40,
+      h: 60,
+      vx: 0,
+      vy: 0,
+      onGround: false,
+      facingRight: true,
+    };
+
+    const SPEED = 4;
+    const JUMP_FORCE = -13;
+    const GRAVITY = 0.5;
+
+    let lives = 3;
+    let gameOver = false;
+    let gameWon = false;
+    let invincible = 0; // countdown in frames
+
+    // Flag sits on the highest platform (x:750, y:300, w:200)
+    const flag = { x: 830, y: 300 };
+
+    const TIMER_LEVELS = [10, 5, 3, 1].map(m => m * 60 * 1000); // progressive difficulty
+    let timerLevel = 0;
+    function currentTimerMs() { return TIMER_LEVELS[timerLevel]; }
+    let timerEnd = null;       // absolute timestamp when time runs out
+    let timerRemaining = currentTimerMs(); // saved remaining ms while paused
+    let timeUp = false;
+    let paused = true;
+
+    // One enemy per platform, patrolling back and forth
+    const enemies = platforms.filter(p => !p.noEnemy).map(p => ({
+      x: p.x + 10,
+      y: p.y - 40,
+      w: 30,
+      h: 40,
+      vx: 0.8,
+      platform: p,
+    }));
+
+    // ── Audio ──────────────────────────────────────────────────────────────
+    // AudioContext is created on first user gesture and kept alive.
+    // Every sound checks state === 'running' before playing so a suspended
+    // context never causes errors — it just skips that sound instance.
+    let audioCtx = null;
+
+    function unlockAudio() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+
+    function ac() { return audioCtx && audioCtx.state === 'running' ? audioCtx : null; }
+
+    function tone(freq1, freq2, type, vol, dur) {
+      const a = ac(); if (!a) return;
+      const osc = a.createOscillator(), g = a.createGain();
+      osc.connect(g); g.connect(a.destination);
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq1, a.currentTime);
+      if (freq2 !== freq1) osc.frequency.linearRampToValueAtTime(freq2, a.currentTime + dur);
+      g.gain.setValueAtTime(vol, a.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + dur);
+      osc.start(a.currentTime);
+      osc.stop(a.currentTime + dur);
+    }
+
+    function playJump() { tone(180, 900, 'sine', 0.6, 0.3); }
+    function playStep()  { /* muted */ }
+    function playLand()  { /* muted */ }
+    function playHit()   { /* muted */ }
+
+    // Background music via setInterval — one note at a time, immune to suspension
+    const MELODY = [
+      392, 392, 440, 392, 523, 494,
+      392, 392, 440, 392, 587, 523,
+      392, 392, 784, 659, 523, 494, 440,
+      698, 698, 659, 523, 587, 523,
+    ];
+    const NOTE_MS = 180;
+    let noteIndex = 0, musicStarted = false;
+
+    function startMusic() { /* muted */ }
+    // ───────────────────────────────────────────────────────────────────────
+
+    function loseLife() {
+      if (invincible > 0) return;
+      lives--;
+      playHit();
+      if (lives <= 0) { gameOver = true; return; }
+      invincible = 90;
+    }
+
+    let stepTimer = 0;
+
+    const keys = {};
+    document.addEventListener('keydown', e => {
+      unlockAudio();
+      if (gameOver) {
+        lives = 3; gameOver = false; gameWon = false; invincible = 0; timeUp = false;
+        timerEnd = performance.now() + currentTimerMs(); timerRemaining = currentTimerMs(); paused = false;
+        player.x = 70; player.y = GROUND_Y - player.h;
+        player.vx = 0; player.vy = 0;
+        return;
+      }
+      if (gameWon) return;
+      keys[e.code] = true;
+    });
+    document.addEventListener('keyup',   e => { keys[e.code] = false; });
+
+    function isMovingLeft()  { return keys['ArrowLeft']  || keys['KeyA']; }
+    function isMovingRight() { return keys['ArrowRight'] || keys['KeyD']; }
+    function isJumping()     { return keys['Space'] || keys['ArrowUp'] || keys['KeyW']; }
+
+    let jumpPressed = false;
+
+    function update() {
+      // Timer check
+      if (timerEnd && performance.now() >= timerEnd) {
+        gameOver = true;
+        timeUp = true;
+        return;
+      }
+
+      // Horizontal movement
+      if (isMovingLeft())  { player.vx = -SPEED; player.facingRight = false; }
+      else if (isMovingRight()) { player.vx =  SPEED; player.facingRight = true; }
+      else player.vx = 0;
+
+      // Jump (only on ground, only on fresh press)
+      if (isJumping() && player.onGround && !jumpPressed) {
+        player.vy = JUMP_FORCE;
+        jumpPressed = true;
+        playJump();
+      }
+      if (!isJumping()) jumpPressed = false;
+
+      // Gravity
+      player.vy += GRAVITY;
+
+      // Move
+      player.x += player.vx;
+      player.y += player.vy;
+
+      // Clamp horizontal to canvas
+      player.x = Math.max(0, Math.min(canvas.width - player.w, player.x));
+
+      // Footstep sound while walking on ground
+      if (player.onGround && player.vx !== 0) {
+        stepTimer++;
+        if (stepTimer >= 18) { playStep(); stepTimer = 0; }
+      } else {
+        stepTimer = 0;
+      }
+
+      if (invincible > 0) invincible--;
+
+      // Fall off bottom → lose a life, pop back up at same X
+      if (player.y > canvas.height) {
+        loseLife();
+        player.y = GROUND_Y - player.h;
+        player.vy = 0;
+        return;
+      }
+
+      // Platform collision (only landing on top)
+      const wasOnGround = player.onGround;
+      player.onGround = false;
+      let activeConveyor = 0;
+      for (const p of platforms) {
+        const prevBottom = player.y + player.h - player.vy;
+        const currBottom = player.y + player.h;
+        const inX = player.x + player.w > p.x && player.x < p.x + p.w;
+        if (inX && prevBottom <= p.y && currBottom >= p.y && player.vy >= 0) {
+          player.y = p.y - player.h;
+          player.vy = 0;
+          player.onGround = true;
+          if (p.conveyor) activeConveyor = p.conveyor;
+        }
+      }
+      if (activeConveyor) {
+        player.x += activeConveyor;
+        player.facingRight = activeConveyor > 0;
+      }
+      if (!wasOnGround && player.onGround) playLand();
+
+      // Win condition — player touches the flag
+      if (player.onGround &&
+          player.x + player.w > flag.x - 18 && player.x < flag.x + 18 &&
+          Math.abs(player.y + player.h - flag.y) <= 2) {
+        gameWon = true;
+        timerRemaining = timerEnd ? Math.max(0, timerEnd - performance.now()) : timerRemaining;
+        timerEnd = null;
+        return;
+      }
+
+      // Update enemies + check collision with player
+      for (const e of enemies) {
+        e.x += e.vx;
+        if (e.x <= e.platform.x || e.x + e.w >= e.platform.x + e.platform.w) {
+          e.vx *= -1;
+        }
+
+        // Simple AABB hit — lose a life
+        const hit = player.x < e.x + e.w && player.x + player.w > e.x &&
+                    player.y < e.y + e.h && player.y + player.h > e.y;
+        if (hit) { loseLife(); return; }
+      }
+    }
+
+    // Draw the mushroom character (based on the sketch)
+    function drawCharacter(cx, cy, facingRight) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      if (!facingRight) { ctx.scale(-1, 1); }
+
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // Cap (mushroom top)
+      ctx.beginPath();
+      ctx.ellipse(0, -28, 20, 14, 0, Math.PI, 0); // upper half ellipse
+      ctx.stroke();
+
+      // Cap brim curve
+      ctx.beginPath();
+      ctx.moveTo(-22, -14);
+      ctx.quadraticCurveTo(0, -8, 22, -14);
+      ctx.stroke();
+
+      // Body / stem
+      ctx.beginPath();
+      ctx.moveTo(-6, -12);
+      ctx.lineTo(-6, 10);
+      ctx.lineTo(6, 10);
+      ctx.lineTo(6, -12);
+      ctx.stroke();
+
+      // Left arm (holding something)
+      ctx.beginPath();
+      ctx.moveTo(-6, -2);
+      ctx.quadraticCurveTo(-18, 4, -14, 14);
+      ctx.stroke();
+
+      // Hand / item at end of arm
+      ctx.beginPath();
+      ctx.arc(-14, 16, 4, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Right arm
+      ctx.beginPath();
+      ctx.moveTo(6, -2);
+      ctx.lineTo(14, 4);
+      ctx.stroke();
+
+      // Legs
+      ctx.beginPath();
+      ctx.moveTo(-3, 10);
+      ctx.lineTo(-5, 24);   // left leg
+      ctx.moveTo(3, 10);
+      ctx.lineTo(5, 24);    // right leg
+      ctx.stroke();
+
+      // Feet
+      ctx.beginPath();
+      ctx.moveTo(-10, 24);
+      ctx.lineTo(0, 24);    // left foot
+      ctx.moveTo(0, 24);
+      ctx.lineTo(10, 24);   // right foot
+      ctx.stroke();
+
+      // Eye
+      ctx.beginPath();
+      ctx.arc(5, -20, 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#111';
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    // Draw a simple spiky enemy
+    function drawEnemy(cx, cy, facingRight) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      if (!facingRight) ctx.scale(-1, 1);
+
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // Round body
+      ctx.beginPath();
+      ctx.arc(0, -8, 14, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Spikes on top
+      for (let i = -2; i <= 2; i++) {
+        const bx = i * 7;
+        const by = -8 - Math.sqrt(Math.max(0, 14 * 14 - bx * bx));
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.lineTo(bx + 3, by - 8);
+        ctx.stroke();
+      }
+
+      // Eyes (angry)
+      ctx.beginPath();
+      ctx.moveTo(-6, -12);
+      ctx.lineTo(-2, -10);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(-4, -8, 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#111';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(5, -8, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Stubby legs
+      ctx.strokeStyle = '#111';
+      ctx.beginPath();
+      ctx.moveTo(-5, 6);
+      ctx.lineTo(-7, 18);
+      ctx.moveTo(5, 6);
+      ctx.lineTo(7, 18);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawFlag() {
+      const px = flag.x, py = flag.y;
+      // Pole
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px, py - 52);
+      ctx.stroke();
+      // Flag triangle
+      ctx.fillStyle = '#e53935';
+      ctx.beginPath();
+      ctx.moveTo(px, py - 52);
+      ctx.lineTo(px + 30, py - 41);
+      ctx.lineTo(px, py - 30);
+      ctx.closePath();
+      ctx.fill();
+      // Star on flag
+      ctx.fillStyle = 'white';
+      ctx.font = 'bold 13px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('★', px + 6, py - 37);
+    }
+
+    function drawLives() {
+      const r = 10, spacing = 28, startX = 20, y = 20;
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc(startX + i * spacing, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = i < lives ? 'red' : 'black';
+        ctx.fill();
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw platforms as thick grass blocks (drawn first, behind character)
+      for (const p of platforms) {
+        // Dirt body
+        ctx.fillStyle = '#8B5E3C';
+        ctx.fillRect(p.x, p.y + 3, p.w, 10);
+        // Grass top
+        ctx.fillStyle = '#4CAF50';
+        ctx.fillRect(p.x, p.y, p.w, 3);
+        // Highlight stripe
+        ctx.fillStyle = '#66BB6A';
+        ctx.fillRect(p.x, p.y, p.w, 1);
+      }
+
+      drawFlag();
+
+      // Draw enemies
+      for (const e of enemies) {
+        const facingRight = e.vx > 0;
+        drawEnemy(e.x + e.w / 2, e.y + e.h - 18, facingRight);
+      }
+
+      // Draw character — flash every 6 frames while invincible
+      if (invincible === 0 || Math.floor(invincible / 6) % 2 === 0) {
+        const cx = player.x + player.w / 2;
+        const cy = player.y + player.h - 24;
+        drawCharacter(cx, cy, player.facingRight);
+      }
+
+      drawLives();
+
+      // Draw countdown timer
+      if (!gameOver && !gameWon) {
+        const remaining = timerEnd ? Math.max(0, timerEnd - performance.now()) : timerRemaining;
+        const minutes = Math.floor(remaining / 60000);
+        const seconds = Math.floor((remaining % 60000) / 1000);
+        const timeStr = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+        ctx.font = 'bold 20px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = remaining < 30000 ? 'red' : '#333';
+        ctx.fillText(timeStr, canvas.width - 16, 30);
+      }
+
+      // Pause overlay
+      if (paused && !gameOver && !gameWon) {
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 40px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(timerEnd ? 'PAUSED' : 'Press ON to start', canvas.width / 2, canvas.height / 2);
+      }
+
+      if (gameWon) {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#FFD700';
+        ctx.font = 'bold 64px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('YOU WIN! 🎉', canvas.width / 2, canvas.height / 2 - 30);
+        ctx.fillStyle = 'white';
+        ctx.font = '28px sans-serif';
+        ctx.fillText('Congratulations!', canvas.width / 2, canvas.height / 2 + 20);
+        ctx.font = '18px sans-serif';
+        ctx.fillText('Press ON to play again', canvas.width / 2, canvas.height / 2 + 60);
+      }
+
+      if (gameOver) {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'white';
+        ctx.font = 'bold 52px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(timeUp ? "TIME'S UP!" : 'GAME OVER', canvas.width / 2, canvas.height / 2 - 20);
+        ctx.font = '22px sans-serif';
+        ctx.fillText('Press any key to play again', canvas.width / 2, canvas.height / 2 + 30);
+      }
+    }
+
+    function onGame() {
+      if (gameWon) {
+        lives = 3; gameOver = false; gameWon = false; invincible = 0; timeUp = false;
+        timerLevel = Math.min(timerLevel + 1, TIMER_LEVELS.length - 1);
+        timerRemaining = currentTimerMs(); timerEnd = performance.now() + currentTimerMs(); paused = false;
+        player.x = 70; player.y = GROUND_Y - player.h;
+        player.vx = 0; player.vy = 0;
+        unlockAudio(); startMusic();
+        return;
+      }
+      if (paused && !gameOver) {
+        paused = false;
+        timerEnd = performance.now() + timerRemaining;
+        unlockAudio();
+        startMusic();
+      }
+    }
+
+    function offGame() {
+      if (!paused && !gameOver) {
+        paused = true;
+        timerRemaining = Math.max(0, timerEnd - performance.now());
+        timerEnd = null;
+      }
+    }
+
+    function loop() {
+      if (!gameOver && !gameWon && !paused) update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+  </script>
+</body>
+</html>

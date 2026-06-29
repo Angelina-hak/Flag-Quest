@@ -7,11 +7,12 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #111; font-family: sans-serif; }
     body { display: flex; flex-direction: column; align-items: center; justify-content: center; }
-    canvas { display: block; background: #d8b4fe; }
+    canvas { display: block; }
     #ui { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; z-index: 10; }
     #controls { color: #ccc; font-size: 13px; }
     #coin-counter { padding: 6px 18px; font-size: 15px; font-weight: bold; border: 2px solid #B8860B; border-radius: 6px; background: #FFD700; color: #5a3e00; pointer-events: none; }
     #btn-level1 { padding: 6px 22px; font-size: 15px; font-weight: bold; border: 2px solid #333; border-radius: 6px; cursor: pointer; background: #4CAF50; color: white; }
+    #btn-continue { position: fixed; top: 50%; left: 50%; transform: translate(-50%, 60px); padding: 10px 28px; font-size: 17px; font-weight: bold; border: 2px solid #7c3aed; border-radius: 8px; cursor: pointer; background: #6d28d9; color: white; display: none; z-index: 20; }
   </style>
 </head>
 <body>
@@ -19,6 +20,9 @@
   <div id="ui">
     <div id="coin-counter">🪙 0 / 0 collected</div>
     <button id="btn-level1" onclick="startLevel1()">Level 1</button>
+  </div>
+  <button id="btn-continue" onclick="continueGame()">🗝️ Continue (uses 1 key)</button>
+  <div style="display:none">
     <div id="controls">Arrow Keys / WASD to move &nbsp;|&nbsp; Space / W to jump</div>
   </div>
 
@@ -42,17 +46,18 @@
     const platforms = [
       { x: 0,   y: 420, w: 220 },                       // ground left (start)
       { x: 280, y: 370, w: 150 },                       // first step
-      { x: 500, y: 330, w: 150 },                       // second step
+      { x: 500, y: 330, w: 150, moveSpeed: 1,   moveRange: 90,  moveDir: 1 },  // second step — moves
       { x: 750, y: 300, w: 200 },                       // flag platform (highest)
       { x: 80,  y: 310, w: 130, noEnemy: true, conveyor:  2 },  // decoration — pushes right
       { x: 950, y: 375, w: 140, noEnemy: true, conveyor: -2 },  // decoration — pushes left
-      { x: 630, y: 255, w: 140, noEnemy: true },        // new line 1 — high left
+      { x: 630, y: 255, w: 140, noEnemy: true, moveSpeed: 1.4, moveRange: 70,  moveDir: -1 }, // moves
       { x: 900, y: 164, w: 140 },                       // new line 2 — enemy here
       { x: 960, y: 235, w: 120, noEnemy: true },        // new line 3 — high right
       { x: 1060,y: 335, w: 130, noEnemy: true, conveyor:  2 },  // decoration — pushes right (flag)
     ];
 
-    const GROUND_Y = 420; // top of the leftmost ground platform
+    const GROUND_Y = 420;
+    for (const p of platforms) { if (p.moveSpeed) p.baseX = p.x; }
 
     const player = {
       x: 70,
@@ -69,12 +74,39 @@
     const JUMP_FORCE = -13;
     const GRAVITY = 0.5;
 
-    let maxLives = 5;
+    let maxLives = 3;
     let lives = maxLives;
     let score = 0;
     let gameOver = false;
     let gameWon = false;
     let invincible = 0; // countdown in frames
+
+    // Particles
+    const particles = [];
+    function spawnCoinParticles(x, y) {
+      const colors = ['#FFD700', '#FFF176', '#FFB300', '#FFFFFF'];
+      for (let i = 0; i < 10; i++) {
+        const angle = (Math.PI * 2 / 10) * i + Math.random() * 0.4;
+        const speed = 1.5 + Math.random() * 2.5;
+        particles.push({
+          x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 1,
+          life: 1, color: colors[i % colors.length], r: 3 + Math.random() * 2,
+        });
+      }
+    }
+
+    // Screen shake
+    let shakeFrames = 0;
+    function triggerShake() { shakeFrames = 14; }
+
+    // Clouds
+    const clouds = [
+      { x: 100,  y: 60,  w: 90,  h: 32 },
+      { x: 320,  y: 40,  w: 120, h: 38 },
+      { x: 580,  y: 80,  w: 100, h: 30 },
+      { x: 820,  y: 50,  w: 110, h: 36 },
+      { x: 1050, y: 70,  w: 95,  h: 28 },
+    ];
 
     // Flag sits on the last platform (x:1060, y:335, w:130)
     const flag = { x: 1125, y: 335 };
@@ -86,19 +118,37 @@
     let timerRemaining = currentTimerMs();
     let timeUp = false;
     let paused = true;
+    let currentLevel = 1;
+    let highScore = parseInt(localStorage.getItem('flagquest_hs') || '0');
 
-    // Coins — 3 per platform, spaced evenly along each platform
-    const COIN_ATTRACT_RADIUS = 120; // pixels — how close before they slide toward you
-    const COIN_ATTRACT_SPEED  = 4;   // pixels/frame toward player once attracted
+    // Keys — 3 per level, floating at fixed positions
+    let collectedKeys = 0;
+    const levelKeys = [
+      { x: 160, y: 275, collected: false },
+      { x: 665, y: 215, collected: false },
+      { x: 985, y: 195, collected: false },
+    ];
+
+    // Coins — 3 per platform, random positions
+    const COIN_ATTRACT_RADIUS = 120;
+    const COIN_ATTRACT_SPEED  = 4;
     const coins = [];
+    const COIN_TIERS = [
+      { value: 1, color: '#FFD700', border: '#B8860B' },
+      { value: 3, color: '#60a5fa', border: '#1d4ed8' },
+      { value: 5, color: '#f472b6', border: '#be185d' },
+    ];
+    function coinTier() {
+      const r = Math.random();
+      return r < 0.6 ? COIN_TIERS[0] : r < 0.9 ? COIN_TIERS[1] : COIN_TIERS[2];
+    }
+    function randomCoinX(p) { return p.x + 10 + Math.random() * Math.max(0, p.w - 20); }
     for (const p of platforms) {
-      const count = 3;
-      for (let i = 0; i < count; i++) {
+      for (let i = 0; i < 3; i++) {
+        const tier = coinTier();
         coins.push({
-          x: p.x + (p.w / (count + 1)) * (i + 1),
-          y: p.y - 14,        // float just above the platform surface
-          r: 7,
-          collected: false,
+          x: randomCoinX(p), y: p.y - 14, r: 7, collected: false,
+          value: tier.value, color: tier.color, border: tier.border,
         });
       }
     }
@@ -174,6 +224,7 @@
       if (invincible > 0) return;
       lives--;
       playHit();
+      triggerShake();
       if (lives <= 0) { gameOver = true; return; }
       invincible = 90;
       player.x = 70;
@@ -190,6 +241,7 @@
       if (gameOver || gameWon) {
         const wasWon = gameWon;
         lives = maxLives; score = 0; gameOver = false; gameWon = false; invincible = 0; timeUp = false;
+        collectedKeys = 0; levelKeys.forEach(k => { k.collected = false; });
         if (wasWon) timerLevel = Math.min(timerLevel + 1, TIMER_LEVELS.length - 1);
         timerRemaining = currentTimerMs(); timerEnd = performance.now() + currentTimerMs();
         player.x = 70; player.y = GROUND_Y - player.h;
@@ -205,7 +257,7 @@
           }
         }
         updateCoinCounter();
-        resetEnemies(0.8);
+        resetEnemies(currentLevel === 3 ? 4 : currentLevel === 2 ? 2.5 : 0.4);
         return;
       }
       keys[e.code] = true;
@@ -224,6 +276,13 @@
         gameOver = true;
         timeUp = true;
         return;
+      }
+
+      // Move platforms
+      for (const p of platforms) {
+        if (!p.moveSpeed) continue;
+        p.x += p.moveSpeed * p.moveDir;
+        if (p.x > p.baseX + p.moveRange || p.x < p.baseX - p.moveRange) p.moveDir *= -1;
       }
 
       // Horizontal movement
@@ -269,6 +328,7 @@
       const wasOnGround = player.onGround;
       player.onGround = false;
       let activeConveyor = 0;
+      let activePlatformVx = 0;
       for (const p of platforms) {
         const prevBottom = player.y + player.h - player.vy;
         const currBottom = player.y + player.h;
@@ -278,25 +338,26 @@
           player.vy = 0;
           player.onGround = true;
           if (p.conveyor) activeConveyor = p.conveyor;
+          if (p.moveSpeed) activePlatformVx = p.moveSpeed * p.moveDir;
         }
       }
       if (activeConveyor) {
         player.x += activeConveyor;
         player.facingRight = activeConveyor > 0;
       }
+      if (activePlatformVx) player.x += activePlatformVx;
       if (!wasOnGround && player.onGround) playLand();
 
-      // Win condition — player touches the flag with all coins collected
-      const allCollected = coins.every(c => c.collected);
-      if (player.onGround && allCollected &&
+      // Win condition — player touches the flag
+      if (player.onGround &&
           player.x + player.w > flag.x - 18 && player.x < flag.x + 18 &&
           Math.abs(player.y + player.h - flag.y) <= 2) {
         gameWon = true;
         timerRemaining = timerEnd ? Math.max(0, timerEnd - performance.now()) : timerRemaining;
         timerEnd = null;
         const btn = document.getElementById('btn-level1');
-        const nextLabel = btn.textContent === 'Level 2' ? 'Level 1' : 'Level 2';
-        btn.textContent = nextLabel;
+        const nextLevel = currentLevel === 3 ? 1 : currentLevel + 1;
+        btn.textContent = 'Level ' + nextLevel;
         btn.disabled = false;
         return;
       }
@@ -316,11 +377,32 @@
           // collect if close enough
           if (dist < player.w / 2 + c.r) {
             c.collected = true;
-            score++;
+            score += c.value;
+            if (score > highScore) { highScore = score; localStorage.setItem('flagquest_hs', highScore); }
             tone(880, 1200, 'sine', 0.4, 0.15);
+            spawnCoinParticles(c.x, c.y);
             updateCoinCounter();
           }
         }
+      }
+
+      // Collect keys
+      for (const k of levelKeys) {
+        if (k.collected) continue;
+        const dx = (player.x + player.w / 2) - k.x;
+        const dy = (player.y + player.h / 2) - k.y;
+        if (Math.sqrt(dx*dx + dy*dy) < player.w / 2 + 10) {
+          k.collected = true;
+          collectedKeys++;
+          tone(600, 1400, 'sine', 0.5, 0.3);
+        }
+      }
+
+      // Update particles
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.life -= 0.04;
+        if (p.life <= 0) particles.splice(i, 1);
       }
 
       // Update enemies + check collision with player
@@ -410,12 +492,13 @@
     }
 
     // Draw a simple spiky enemy
-    function drawEnemy(cx, cy, facingRight) {
+    function drawEnemy(cx, cy, facingRight, color) {
+      color = color || '#111';
       ctx.save();
       ctx.translate(cx, cy);
       if (!facingRight) ctx.scale(-1, 1);
 
-      ctx.strokeStyle = '#111';
+      ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -442,7 +525,7 @@
       ctx.stroke();
       ctx.beginPath();
       ctx.arc(-4, -8, 2, 0, Math.PI * 2);
-      ctx.fillStyle = '#111';
+      ctx.fillStyle = color;
       ctx.fill();
 
       ctx.beginPath();
@@ -450,7 +533,7 @@
       ctx.fill();
 
       // Stubby legs
-      ctx.strokeStyle = '#111';
+      ctx.strokeStyle = color;
       ctx.beginPath();
       ctx.moveTo(-5, 6);
       ctx.lineTo(-7, 18);
@@ -498,8 +581,79 @@
       }
     }
 
+    function drawBackground() {
+      // Sky gradient — red/dark for Level 3, purple otherwise
+      const sky = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      if (currentLevel === 3) {
+        sky.addColorStop(0, '#1a0000');
+        sky.addColorStop(1, '#7f1d1d');
+      } else {
+        sky.addColorStop(0, '#a78bfa');
+        sky.addColorStop(1, '#e9d5ff');
+      }
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Distant hills
+      ctx.fillStyle = currentLevel === 3 ? 'rgba(180,20,20,0.3)' : 'rgba(167,139,250,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height);
+      ctx.bezierCurveTo(100, 320, 250, 280, 400, 340);
+      ctx.bezierCurveTo(550, 400, 650, 300, 800, 350);
+      ctx.bezierCurveTo(950, 400, 1100, 310, 1200, 360);
+      ctx.lineTo(1200, canvas.height);
+      ctx.closePath();
+      ctx.fill();
+
+      // Clouds
+      ctx.fillStyle = currentLevel === 3 ? 'rgba(180,50,50,0.4)' : 'rgba(255,255,255,0.75)';
+      for (const c of clouds) {
+        ctx.beginPath();
+        ctx.ellipse(c.x,          c.y,          c.w * 0.5, c.h * 0.5, 0, 0, Math.PI * 2);
+        ctx.ellipse(c.x + c.w*0.3, c.y - c.h*0.2, c.w * 0.35, c.h * 0.45, 0, 0, Math.PI * 2);
+        ctx.ellipse(c.x - c.w*0.3, c.y - c.h*0.1, c.w * 0.3,  c.h * 0.4,  0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawKeyItem(x, y) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.strokeStyle = '#fbbf24';
+      ctx.fillStyle = '#fbbf24';
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = 'round';
+      // ring
+      ctx.beginPath();
+      ctx.arc(0, -6, 6, 0, Math.PI * 2);
+      ctx.stroke();
+      // shaft
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(0, 10);
+      ctx.stroke();
+      // teeth
+      ctx.beginPath();
+      ctx.moveTo(0, 5); ctx.lineTo(4, 5);
+      ctx.moveTo(0, 8); ctx.lineTo(3, 8);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Screen shake
+      ctx.save();
+      if (shakeFrames > 0) {
+        const mag = shakeFrames * 0.8;
+        ctx.translate(
+          (Math.random() * 2 - 1) * mag,
+          (Math.random() * 2 - 1) * mag
+        );
+        shakeFrames--;
+      }
+
+      drawBackground();
 
       // Draw platforms as thick grass blocks (drawn first, behind character)
       for (const p of platforms) {
@@ -520,26 +674,32 @@
         ctx.save();
         ctx.beginPath();
         ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
-        ctx.fillStyle = '#FFD700';
+        ctx.fillStyle = c.color;
         ctx.fill();
-        ctx.strokeStyle = '#B8860B';
+        ctx.strokeStyle = c.border;
         ctx.lineWidth = 1.5;
         ctx.stroke();
-        // small $ highlight
-        ctx.fillStyle = '#B8860B';
+        ctx.fillStyle = c.border;
         ctx.font = 'bold 8px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('$', c.x, c.y);
+        ctx.fillText(c.value > 1 ? c.value : '$', c.x, c.y);
         ctx.restore();
+      }
+
+      // Draw keys
+      for (const k of levelKeys) {
+        if (k.collected) continue;
+        drawKeyItem(k.x, k.y);
       }
 
       drawFlag();
 
       // Draw enemies
+      const enemyColor = currentLevel >= 2 ? '#c0392b' : '#111';
       for (const e of enemies) {
         const facingRight = e.vx > 0;
-        drawEnemy(e.x + e.w / 2, e.y + e.h - 18, facingRight);
+        drawEnemy(e.x + e.w / 2, e.y + e.h - 18, facingRight, enemyColor);
       }
 
       // Draw character — flash every 6 frames while invincible
@@ -547,6 +707,17 @@
         const cx = player.x + player.w / 2;
         const cy = player.y + player.h - 24;
         drawCharacter(cx, cy, player.facingRight);
+      }
+
+      // Draw particles
+      for (const p of particles) {
+        ctx.save();
+        ctx.globalAlpha = p.life;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+        ctx.restore();
       }
 
       drawLives();
@@ -557,6 +728,23 @@
       ctx.fillStyle = '#FFD700';
       ctx.fillText('$ ' + score, 16, 50);
 
+      // Draw high score
+      ctx.font = '14px sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.fillText('Best: ' + highScore, 16, 70);
+
+      // Draw key count
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillText('🗝️ ' + collectedKeys, 16, 90);
+
+      // Draw level indicator
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.fillText('Level ' + currentLevel, canvas.width - 16, 55);
+
       // Draw countdown timer
       if (!gameOver && !gameWon) {
         const remaining = timerEnd ? Math.max(0, timerEnd - performance.now()) : timerRemaining;
@@ -565,9 +753,11 @@
         const timeStr = `${minutes}:${seconds.toString().padStart(2, '0')}`;
         ctx.font = 'bold 20px sans-serif';
         ctx.textAlign = 'right';
-        ctx.fillStyle = remaining < 30000 ? 'red' : '#333';
+        ctx.fillStyle = remaining < 60000 ? 'red' : '#333';
         ctx.fillText(timeStr, canvas.width - 16, 30);
       }
+
+      ctx.restore(); // end screen shake transform
 
       if (paused && !gameOver && !gameWon) {
         ctx.fillStyle = 'rgba(0,0,0,0.45)';
@@ -602,38 +792,60 @@
         ctx.font = '22px sans-serif';
         ctx.fillText('Press any key to play again', canvas.width / 2, canvas.height / 2 + 30);
       }
+
+      // Show/hide continue button
+      const btnContinue = document.getElementById('btn-continue');
+      btnContinue.style.display = (gameOver && !timeUp && collectedKeys > 0) ? 'block' : 'none';
+      if (gameOver && !timeUp && collectedKeys > 0) {
+        btnContinue.textContent = '🗝️ Continue (uses 1 key, you have ' + collectedKeys + ')';
+      }
     }
 
     function startLevel1() {
       const btn = document.getElementById('btn-level1');
-      const isLevel2 = btn.textContent === 'Level 2';
+      const levelNum = parseInt(btn.textContent.replace('Level ', '')) || 1;
+      currentLevel = levelNum;
 
-      // Reset game state for whichever level is starting
-      lives = maxLives; score = 0; gameOver = false; gameWon = false; invincible = 0; timeUp = false;
+      // Reset game state
+      score = 0; gameOver = false; gameWon = false; invincible = 0; timeUp = false;
       timerLevel = Math.min(timerLevel + 1, TIMER_LEVELS.length - 1);
       timerRemaining = currentTimerMs();
       player.x = 70; player.y = GROUND_Y - player.h;
       player.vx = 0; player.vy = 0;
-      coins.forEach(c => { c.collected = false; });
+
+      // Reset keys
+      collectedKeys = 0;
+      levelKeys.forEach(k => { k.collected = false; });
+
+      // Reset moving platforms
+      for (const p of platforms) { if (p.moveSpeed) { p.x = p.baseX; p.moveDir = 1; } }
+
+      // Reset coins with fresh tiers
       let ci = 0;
       for (const p of platforms) {
         const count = 3;
         for (let i = 0; i < count; i++) {
+          const tier = coinTier();
           coins[ci].x = p.x + (p.w / (count + 1)) * (i + 1);
           coins[ci].y = p.y - 14;
+          coins[ci].collected = false;
+          coins[ci].value = tier.value;
+          coins[ci].color = tier.color;
+          coins[ci].border = tier.border;
           ci++;
         }
       }
       updateCoinCounter();
 
-      if (isLevel2) {
-        resetEnemies(2);
-        canvas.style.background = '#ffb6c1';
+      if (currentLevel === 3) {
+        resetEnemies(4);
         maxLives = 3;
+      } else if (currentLevel === 2) {
+        resetEnemies(2.5);
+        maxLives = 5;
       } else {
         resetEnemies(0.8);
-        canvas.style.background = '#d8b4fe';
-        maxLives = 5;
+        maxLives = 3;
       }
       lives = maxLives;
 
@@ -643,6 +855,17 @@
         unlockAudio();
         btn.disabled = true;
       }
+    }
+
+    function continueGame() {
+      if (!gameOver || collectedKeys <= 0) return;
+      collectedKeys--;
+      lives = 1;
+      gameOver = false;
+      invincible = 90;
+      timerEnd = performance.now() + Math.max(timerRemaining, 30000);
+      document.getElementById('btn-continue').style.display = 'none';
+      unlockAudio();
     }
 
     function loop() {
